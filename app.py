@@ -140,21 +140,50 @@ st.markdown("# 🏠 Prediksi Harga Rumah Tangerang")
 st.markdown("Estimasi harga properti berbasis machine learning dengan analisis visual lengkap.")
 st.markdown("---")
 
-if not predict_clicked:
+# ── Session state: simpan hasil prediksi agar tidak hilang saat re-run ────────
+if predict_clicked:
+    district_encoded = district_mean_price[district]
+    input_data = np.array([[
+        facilities, bedrooms, bathrooms, land_size, building_size,
+        carports, electricity, maid_bedrooms, maid_bathrooms,
+        floors, property_condition, garages, furnishing, district_encoded
+    ]])
+    st.session_state["prediction"] = model.predict(input_data)[0]
+    st.session_state["inputs"] = {
+        "district": district, "facilities": facilities, "bedrooms": bedrooms,
+        "bathrooms": bathrooms, "land_size": land_size, "building_size": building_size,
+        "carports": carports, "electricity": electricity, "maid_bedrooms": maid_bedrooms,
+        "maid_bathrooms": maid_bathrooms, "floors": floors,
+        "property_condition": property_condition, "garages": garages,
+        "furnishing": furnishing, "district_encoded": float(district_encoded)
+    }
+    st.session_state["ai_analysis"] = None  # reset analisis lama
+
+if "prediction" not in st.session_state:
     st.info("👈 Isi detail properti di sidebar, lalu klik **Prediksi Harga**.")
     st.stop()
 
-# ── Predict ──────────────────────────────────────────────────────────────────
-district_encoded = district_mean_price[district]
-input_data = np.array([[
-    facilities, bedrooms, bathrooms, land_size, building_size,
-    carports, electricity, maid_bedrooms, maid_bathrooms,
-    floors, property_condition, garages, furnishing, district_encoded
-]])
-prediction = model.predict(input_data)[0]
+# Ambil dari session state
+prediction    = st.session_state["prediction"]
+inp           = st.session_state["inputs"]
+district      = inp["district"]
+facilities    = inp["facilities"]
+bedrooms      = inp["bedrooms"]
+bathrooms     = inp["bathrooms"]
+land_size     = inp["land_size"]
+building_size = inp["building_size"]
+carports      = inp["carports"]
+electricity   = inp["electricity"]
+maid_bedrooms = inp["maid_bedrooms"]
+maid_bathrooms= inp["maid_bathrooms"]
+floors        = inp["floors"]
+property_condition = inp["property_condition"]
+garages       = inp["garages"]
+furnishing    = inp["furnishing"]
+district_encoded   = inp["district_encoded"]
 
 # Helper prices
-price_B = prediction / 1e9       # milyar
+price_B        = prediction / 1e9
 price_per_land = prediction / land_size if land_size > 0 else 0
 price_per_bldg = prediction / building_size if building_size > 0 else 0
 
@@ -385,6 +414,111 @@ fig_sim.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
 )
 st.plotly_chart(fig_sim, use_container_width=True)
+
+# ── Row 5: Analisis LLM (Groq) ───────────────────────────────────────────────
+st.markdown('<p class="section-title">🤖 Analisis AI — Interpretasi Hasil Prediksi</p>', unsafe_allow_html=True)
+
+# Siapkan ringkasan sensitivitas untuk konteks LLM
+top_positive = df_sens[df_sens["Delta (Juta Rp)"] > 0].sort_values("Delta (Juta Rp)", ascending=False).head(3)
+top_negative = df_sens[df_sens["Delta (Juta Rp)"] < 0].sort_values("Delta (Juta Rp)").head(3)
+
+sens_pos_text = ", ".join([f"{r['Fitur']} (+{r['Delta (Juta Rp)']:.1f} Jt)" for _, r in top_positive.iterrows()])
+sens_neg_text = ", ".join([f"{r['Fitur']} ({r['Delta (Juta Rp)']:.1f} Jt)" for _, r in top_negative.iterrows()])
+
+kondisi_label = ["Butuh Renovasi","Bagus","Bagus Sekali","Sudah Renovasi","Baru"][property_condition]
+furnish_label = ["Unfurnished","Semi Furnished","Furnished"][furnishing]
+dist_avg = district_mean_price[district] / 1e9
+dist_rank = int((district_mean_price.rank(ascending=False)[district]))
+dist_total = len(district_mean_price)
+
+prompt_context = f"""
+Kamu adalah analis properti berpengalaman di pasar Tangerang, Indonesia.
+Berikan analisis singkat, jelas, dan actionable dalam Bahasa Indonesia.
+Gunakan format dengan beberapa paragraf pendek (bukan bullet point).
+
+DATA PROPERTI:
+- Distrik: {district} (rata-rata harga distrik: Rp {dist_avg:.2f} Milyar, peringkat {dist_rank} dari {dist_total} distrik)
+- Luas Tanah: {land_size} m², Luas Bangunan: {building_size} m²
+- Kamar Tidur: {bedrooms}, Kamar Mandi: {bathrooms}
+- Lantai: {floors}, Garasi: {garages}, Carport: {carports}
+- Kondisi: {kondisi_label}, Furnishing: {furnish_label}
+- Fasilitas: {facilities}, Listrik: {electricity} VA
+- Kamar Pembantu: {maid_bedrooms}, Kamar Mandi Pembantu: {maid_bathrooms}
+
+HASIL PREDIKSI MODEL:
+- Estimasi Harga: Rp {price_B:.2f} Milyar (Rp {prediction:,.0f})
+- Harga per m² Tanah: Rp {price_per_land/1e6:.1f} Juta
+- Harga per m² Bangunan: Rp {price_per_bldg/1e6:.1f} Juta
+- Selisih vs rata-rata distrik: Rp {(prediction - district_mean_price[district])/1e6:.1f} Juta
+
+SENSITIVITAS FITUR (fitur paling berpengaruh menaikkan harga): {sens_pos_text}
+SENSITIVITAS FITUR (fitur yang justru menurunkan harga jika ditambah): {sens_neg_text}
+
+Tolong berikan analisis yang mencakup:
+1. Penilaian singkat apakah harga ini wajar untuk distrik {district}
+2. Keunggulan dan kelemahan properti ini berdasarkan data
+3. Saran konkret untuk meningkatkan nilai properti
+4. Peringatan atau hal yang perlu diperhatikan pembeli/penjual
+"""
+
+groq_api_key = st.secrets.get("GROQ_API_KEY", "")
+
+col_btn, col_model = st.columns([2, 1])
+with col_model:
+    groq_model = st.selectbox(
+        "Model",
+        ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"],
+        label_visibility="collapsed"
+    )
+with col_btn:
+    analyze_clicked = st.button("✨ Generate Analisis AI", use_container_width=True)
+
+if analyze_clicked:
+    if not groq_api_key:
+        st.warning("⚠️ GROQ_API_KEY belum diset. Tambahkan di Settings → Secrets.")
+    else:
+        try:
+            from groq import Groq
+            client = Groq(api_key=groq_api_key)
+
+            with st.spinner("🧠 AI sedang menganalisis properti ini..."):
+                response = client.chat.completions.create(
+                    model=groq_model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Kamu adalah analis properti senior yang ahli di pasar perumahan Tangerang dan Jabodetabek. Berikan analisis yang tajam, jujur, dan praktis."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt_context
+                        }
+                    ],
+                    temperature=0.7,
+                    max_tokens=1024,
+                )
+                st.session_state["ai_analysis"] = {
+                    "text": response.choices[0].message.content,
+                    "model": groq_model,
+                    "tokens": response.usage.total_tokens
+                }
+
+        except ImportError:
+            st.error("Package `groq` belum terinstall. Tambahkan `groq` di packages.txt")
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
+
+# Tampilkan hasil analisis dari session_state (tetap ada meski re-run)
+if st.session_state.get("ai_analysis"):
+    result = st.session_state["ai_analysis"]
+    st.markdown("""
+    <div style="background:white; border-radius:16px; padding:1.6rem 2rem;
+                box-shadow:0 1px 4px rgba(0,0,0,.07); border-left:4px solid #8B5CF6;
+                margin-top:0.5rem; line-height:1.8; color:#1A1F36;">
+    """ + result["text"].replace("\n", "<br>") + """
+    </div>
+    """, unsafe_allow_html=True)
+    st.caption(f"Dianalisis oleh: {result['model']} via Groq · {result['tokens']} tokens digunakan")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")
